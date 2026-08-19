@@ -1,15 +1,29 @@
 [package]
 name = "rust-agent"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-reqwest = { version = "0.12", features = ["json"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["full"] }
+
 rumqttc = { version = "0.25.1", features = ["use-rustls"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
-sysinfo = "0.39"
-toml="0.8"
-rcgen = "0.14.8"
+
+rustls = { version = "0.23", features = ["ring"] }
+
+reqwest = { version = "0.12.28", features = ["json", "rustls-tls"] }
+
 openssl = { version = "0.10", features = ["vendored"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+sysinfo = "0.37"
+
+uuid = { version = "1", features = ["v4", "serde"] }
+
+base64 = "0.22"
+
+urlencoding = "2"
+
+mac_address = "1.1"
+local-ip-address = "0.6"
