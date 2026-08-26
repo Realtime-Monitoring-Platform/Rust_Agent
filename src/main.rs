@@ -25,32 +25,22 @@ use tokio::sync::mpsc;
 // ============================================================
 // CONFIGURATION
 // ============================================================
-const DEVICE_SERVICE_BASE_URL: &str =
-    "http://192.168.1.205:9005/api/v1/devices/provision";
-const MQTT_HOST: &str =
-    "192.168.1.122";
-const MQTT_PORT: u16 =
-    8883;
-const MQTT_KEEP_ALIVE_SECONDS: u64 =
-    30;
-const METRICS_INTERVAL_SECONDS: u64 =
-    5;
+const DEVICE_SERVICE_BASE_URL: &str =  "http://192.168.1.205:9005/api/v1/devices/provision";
+const MQTT_HOST: &str = "192.168.1.122";
+const MQTT_PORT: u16 = 8883;
+const MQTT_KEEP_ALIVE_SECONDS: u64 =  30;
+const METRICS_INTERVAL_SECONDS: u64 = 5;
 // ------------------------------------------------------------
 // COMMAND OUTPUT
 // ------------------------------------------------------------
-const MAX_OUTPUT_BYTES: usize =
-    200_000;
+const MAX_OUTPUT_BYTES: usize =  200_000;
 // ------------------------------------------------------------
 // LOGGING
 // ------------------------------------------------------------
-const MAX_LOG_BYTES: usize =
-    4_000;
-const LOG_BATCH_SIZE: usize =
-    100;
-const LOG_FLUSH_INTERVAL_SECONDS: u64 =
-    1;
-const LOG_CHANNEL_SIZE: usize =
-    10_000;
+const MAX_LOG_BYTES: usize = 4_000;
+const LOG_BATCH_SIZE: usize = 100;
+const LOG_FLUSH_INTERVAL_SECONDS: u64 =  1;
+const LOG_CHANNEL_SIZE: usize = 10_000;
 // ============================================================
 // DEVICE SYSTEM INFO
 // ============================================================
@@ -183,10 +173,7 @@ struct JournalEntry {
 // CURRENT TIME
 // ============================================================
 fn now_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
 }
 // ============================================================
 // DEVICE PATHS
@@ -204,16 +191,10 @@ struct AgentPaths {
 // BUILD PATHS
 // ============================================================
 fn build_paths() -> Result<AgentPaths, Box<dyn std::error::Error>> {
-    let home = env::var("HOME")
-        .map_err(|_| "HOME environment variable is not available")?;
-    let agent_directory =
-        PathBuf::from(home)
-            .join(".monitoring-agent");
-    let pki_directory =
-        agent_directory.join("pki");
-    Ok(AgentPaths {
-        ca_certificate:
-            pki_directory.join("ca.crt"),
+    let home = env::var("HOME").map_err(|_| "HOME environment variable is not available")?;
+    let agent_directory = PathBuf::from(home).join(".monitoring-agent");
+    let pki_directory = agent_directory.join("pki");
+    Ok(AgentPaths {ca_certificate: pki_directory.join("ca.crt"),
         device_certificate:
             pki_directory.join("device.crt"),
         device_key:
@@ -229,8 +210,7 @@ fn build_paths() -> Result<AgentPaths, Box<dyn std::error::Error>> {
 // ============================================================
 // GET PROVISIONING TOKEN
 // ============================================================
-fn get_token() -> Result<String, String> {
-    let args: Vec<String> =
+fn get_token() -> Result<String, String> { let args: Vec<String> =
         env::args().collect();
     if args.len() == 1 {
         return Err(
@@ -254,9 +234,7 @@ fn get_token() -> Result<String, String> {
         }
         index += 1;
     }
-    Err(
-        "Usage: --token <provisioning-token>".to_string()
-    )
+    Err(  "Usage: --token <provisioning-token>".to_string() )
 }
 // ============================================================
 // COLLECT DEVICE SYSTEM INFO
@@ -266,36 +244,14 @@ fn get_token() -> Result<String, String> {
 // info, CPU count, and total memory. This is sent once, along
 // with the CSR, during the first-run provisioning request.
 fn collect_device_info() -> DeviceSystemInfo {
-    let hostname =
-        System::host_name()
-            .unwrap_or_else(|| "unknown".to_string());
-
-    let ip_address =
-        local_ip()
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
-
-    let mac_address =
-        get_mac_address()
-            .ok()
-            .flatten()
-            .map(|m| m.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-    let os_name =
-        System::name()
-            .unwrap_or_else(|| "unknown".to_string());
-    let os_version =
-        System::os_version()
-            .unwrap_or_else(|| "unknown".to_string());
-    let kernel_version =
-        System::kernel_version()
-            .unwrap_or_else(|| "unknown".to_string());
-
-    let mut sys =
-        System::new_all();
+    let hostname = System::host_name()   .unwrap_or_else(|| "unknown".to_string());
+    let ip_address =  local_ip() .map(|ip| ip.to_string()) .unwrap_or_else(|_| "unknown".to_string())
+    let mac_address = get_mac_address().ok().flatten() .map(|m| m.to_string()).unwrap_or_else(|| "unknown".to_string());
+    let os_name =  System::name().unwrap_or_else(|| "unknown".to_string());
+    let os_version = System::os_version().unwrap_or_else(|| "unknown".to_string());
+    let kernel_version = System::kernel_version().unwrap_or_else(|| "unknown".to_string());
+    let mut sys = System::new_all();
     sys.refresh_all();
-
     DeviceSystemInfo {
         hostname,
         ip_address,
@@ -303,10 +259,8 @@ fn collect_device_info() -> DeviceSystemInfo {
         os_name,
         os_version,
         kernel_version,
-        cpu_count:
-            sys.cpus().len(),
-        total_memory_kb:
-            sys.total_memory(),
+        cpu_count:sys.cpus().len(),
+        total_memory_kb:sys.total_memory(),
     }
 }
 // ============================================================
@@ -318,10 +272,8 @@ fn generate_private_key()
         Box<dyn std::error::Error>
     >
 {
-    let rsa =
-        Rsa::generate(2048)?;
-    let private_key =
-        PKey::from_rsa(rsa)?;
+    let rsa = Rsa::generate(2048)?;
+    let private_key = PKey::from_rsa(rsa)?;
     Ok(private_key)
 }
 // ============================================================
