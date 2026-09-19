@@ -16,8 +16,8 @@ use serde::{ Deserialize, Serialize };
 use sysinfo::System;
 use tokio::sync::mpsc;
 
-const DEVICE_SERVICE_BASE_URL: &str = "http://192.168.1.205:9005/api/v1/devices/provision";
-const MQTT_HOST: &str = "192.168.1.122";
+const DEFAULT_DEVICE_SERVICE_BASE_URL: &str = "http://192.168.1.205:9005/api/v1/devices/provision";
+const DEFAULT_MQTT_HOST: &str = "192.168.1.122";
 const MQTT_PORT: u16 = 8883;
 const MQTT_KEEP_ALIVE_SECONDS: u64 = 30;
 const METRICS_INTERVAL_SECONDS: u64 = 5;
@@ -132,6 +132,28 @@ struct JournalEntry {
     command: Option<String>,
     #[serde(rename = "_EXE")]
     executable: Option<String>,
+}
+
+
+
+fn device_service_base_url() -> String {
+    env::var("MONITORING_DEVICE_SERVICE_URL")
+        .unwrap_or_else(|_| DEFAULT_DEVICE_SERVICE_BASE_URL.to_string())
+}
+
+
+
+fn mqtt_host() -> String {
+    env::var("MONITORING_MQTT_HOST").unwrap_or_else(|_| DEFAULT_MQTT_HOST.to_string())
+}
+
+
+S
+fn mqtt_port() -> u16 {
+    env::var("MONITORING_MQTT_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(MQTT_PORT)
 }
 
 fn now_millis() -> u128 {
@@ -281,10 +303,11 @@ async fn provision_device(
         csr: csr_string,
         device_info,
     };
-    println!("Sending provisioning request to {}", DEVICE_SERVICE_BASE_URL);
+    let device_service_url = device_service_base_url();
+    println!("Sending provisioning request to {}", device_service_url);
     let client = Client::new();
     let response = client
-        .post(DEVICE_SERVICE_BASE_URL)
+        .post(device_service_url)
         .header("Authorization", format!("Bearer {}", token))
         .json(&request)
         .send().await?;
@@ -337,8 +360,10 @@ fn create_mqtt_client(
     println!("========================================");
     let client_id = format!("monitoring-agent-{}", identity.device_id);
     println!("MQTT Client ID: {}", client_id);
-    println!("Connecting to MQTT broker {}:{}", MQTT_HOST, MQTT_PORT);
-    let mut mqtt_options = MqttOptions::new(client_id, MQTT_HOST, MQTT_PORT);
+    let host = mqtt_host();
+    let port = mqtt_port();
+    println!("Connecting to MQTT broker {}:{}", host, port);
+    let mut mqtt_options = MqttOptions::new(client_id, host, port);
     mqtt_options.set_keep_alive(Duration::from_secs(MQTT_KEEP_ALIVE_SECONDS));
     let ca = load_certificate(&paths.ca_certificate)?;
     let client_cert = load_certificate(&paths.device_certificate)?;
@@ -348,6 +373,7 @@ fn create_mqtt_client(
     let (client, event_loop) = AsyncClient::new(mqtt_options, 100);
     Ok((client, event_loop))
 }
+
 
 fn command_topic(identity: &DeviceIdentity) -> String {
     format!("tenants/{}/devices/{}/commands", identity.tenant_id, identity.device_id)
@@ -776,19 +802,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let paths = build_paths()?;
 
-    let token = match get_token() {
-        Ok(token) => token,
-        Err(error) => {
-            eprintln!("{}", error);
-            return Ok(());
-        }
-    };
     let identity;
     if device_is_provisioned(&paths) {
         println!("Existing device identity found.");
         identity = load_identity(&paths)?;
     } else {
         println!("No device identity found.");
+        let token = match get_token() {
+            Ok(token) => token,
+            Err(error) => {
+                eprintln!("{}", error);
+                return Ok(());
+            }
+        };
         identity = provision_device(&paths, &token).await?;
     }
     let (mqtt_client, mut event_loop) = create_mqtt_client(&identity, &paths)?;
