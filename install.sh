@@ -24,7 +24,7 @@ Options:
   --help              Show this help.
 EOF
 }
-
+    
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --token) 

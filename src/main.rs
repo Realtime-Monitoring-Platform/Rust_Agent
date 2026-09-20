@@ -148,7 +148,7 @@ fn mqtt_host() -> String {
 }
 
 
-S
+
 fn mqtt_port() -> u16 {
     env::var("MONITORING_MQTT_PORT")
         .ok()
