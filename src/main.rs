@@ -134,20 +134,15 @@ struct JournalEntry {
     executable: Option<String>,
 }
 
-
-
 fn device_service_base_url() -> String {
-    env::var("MONITORING_DEVICE_SERVICE_URL")
-        .unwrap_or_else(|_| DEFAULT_DEVICE_SERVICE_BASE_URL.to_string())
+    env::var("MONITORING_DEVICE_SERVICE_URL").unwrap_or_else(|_|
+        DEFAULT_DEVICE_SERVICE_BASE_URL.to_string()
+    )
 }
-
-
 
 fn mqtt_host() -> String {
     env::var("MONITORING_MQTT_HOST").unwrap_or_else(|_| DEFAULT_MQTT_HOST.to_string())
 }
-
-
 
 fn mqtt_port() -> u16 {
     env::var("MONITORING_MQTT_PORT")
@@ -307,7 +302,7 @@ async fn provision_device(
     println!("Sending provisioning request to {}", device_service_url);
     let client = Client::new();
     let response = client
-        .post(device_service_url)
+        .post(format!("{}/{}", device_service_url, token))
         .header("Authorization", format!("Bearer {}", token))
         .json(&request)
         .send().await?;
@@ -373,7 +368,6 @@ fn create_mqtt_client(
     let (client, event_loop) = AsyncClient::new(mqtt_options, 100);
     Ok((client, event_loop))
 }
-
 
 fn command_topic(identity: &DeviceIdentity) -> String {
     format!("tenants/{}/devices/{}/commands", identity.tenant_id, identity.device_id)
