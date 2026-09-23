@@ -271,50 +271,50 @@ async fn provision_device(
     paths: &AgentPaths,
     token: &str
 ) -> Result<DeviceIdentity, Box<dyn std::error::Error>> {
-    println!("========================================");
-    println!("Starting device provisioning");
-    println!("========================================");
+    //println!("========================================");
+    //println!("Starting device provisioning");
+    //println!("========================================");
     fs::create_dir_all(&paths.agent_directory)?;
     fs::create_dir_all(&paths.pki_directory)?;
-    println!("Generating device private key...");
+    //println!("Generating device private key...");
     let private_key = generate_private_key()?;
     save_private_key(&paths.device_key, &private_key)?;
-    println!("Private key saved to {:?}", paths.device_key);
-    println!("Generating CSR...");
+    //println!("Private key saved to {:?}", paths.device_key);
+    //println!("Generating CSR...");
     let csr = generate_csr(&private_key, "monitoring-device")?;
     fs::write(&paths.device_csr, &csr)?;
-    println!("CSR saved to {:?}", paths.device_csr);
+    //println!("CSR saved to {:?}", paths.device_csr);
     let csr_string = String::from_utf8(csr)?;
-    println!("Collecting device system info...");
+    //println!("Collecting device system info...");
     let device_info = collect_device_info();
-    println!("Hostname: {}", device_info.hostname);
-    println!("IP address: {}", device_info.ip_address);
-    println!("MAC address: {}", device_info.mac_address);
-    println!("OS: {} {}", device_info.os_name, device_info.os_version);
-    println!("Kernel: {}", device_info.kernel_version);
-    println!("CPU count: {}", device_info.cpu_count);
-    println!("Total memory (KB): {}", device_info.total_memory_kb);
+    //println!("Hostname: {}", device_info.hostname);
+    //println!("IP address: {}", device_info.ip_address);
+    //println!("MAC address: {}", device_info.mac_address);
+    //println!("OS: {} {}", device_info.os_name, device_info.os_version);
+    //println!("Kernel: {}", device_info.kernel_version);
+    //println!("CPU count: {}", device_info.cpu_count);
+    //println!("Total memory (KB): {}", device_info.total_memory_kb);
     let request = ProvisionRequest {
         csr: csr_string,
         device_info,
     };
     let device_service_url = device_service_base_url();
-    println!("Sending provisioning request to {}", device_service_url);
+    //println!("Sending provisioning request to {}", device_service_url);
     let client = Client::new();
     let response = client
         .post(format!("{}/{}", device_service_url, token))
         .header("Authorization", format!("Bearer {}", token))
         .json(&request)
         .send().await?;
-    println!("Provisioning HTTP status: {}", response.status());
+    //println!("Provisioning HTTP status: {}", response.status());
     if !response.status().is_success() {
         let body = response.text().await?;
         return Err(format!("Provisioning failed: {}", body).into());
     }
     let provision_response: ProvisionResponse = response.json().await?;
-    println!("Provisioning successful.");
-    println!("Device ID: {}", provision_response.device_id);
-    println!("Tenant ID: {}", provision_response.tenant_id);
+  //  println!("Provisioning successful.");
+  //  println!("Device ID: {}", provision_response.device_id);
+   // println!("Tenant ID: {}", provision_response.tenant_id);
     fs::write(&paths.ca_certificate, provision_response.ca_certificate.as_bytes())?;
     fs::write(&paths.device_certificate, provision_response.client_certificate.as_bytes())?;
     let identity = DeviceIdentity {
@@ -322,9 +322,9 @@ async fn provision_device(
         tenant_id: provision_response.tenant_id,
     };
     save_identity(&paths.identity, &identity)?;
-    println!("CA certificate saved to {:?}", paths.ca_certificate);
-    println!("Device certificate saved to {:?}", paths.device_certificate);
-    println!("Identity saved to {:?}", paths.identity);
+//    println!("CA certificate saved to {:?}", paths.ca_certificate);
+  //  println!("Device certificate saved to {:?}", paths.device_certificate);
+   // println!("Identity saved to {:?}", paths.identity);
     Ok(identity)
 }
 
@@ -350,14 +350,14 @@ fn create_mqtt_client(
     identity: &DeviceIdentity,
     paths: &AgentPaths
 ) -> Result<(AsyncClient, rumqttc::EventLoop), Box<dyn std::error::Error>> {
-    println!("========================================");
-    println!("Creating MQTT client...");
-    println!("========================================");
+   // println!("========================================");
+    //println!("Creating MQTT client...");
+    //println!("========================================");
     let client_id = format!("monitoring-agent-{}", identity.device_id);
-    println!("MQTT Client ID: {}", client_id);
+    //println!("MQTT Client ID: {}", client_id);
     let host = mqtt_host();
     let port = mqtt_port();
-    println!("Connecting to MQTT broker {}:{}", host, port);
+    //println!("Connecting to MQTT broker {}:{}", host, port);
     let mut mqtt_options = MqttOptions::new(client_id, host, port);
     mqtt_options.set_keep_alive(Duration::from_secs(MQTT_KEEP_ALIVE_SECONDS));
     let ca = load_certificate(&paths.ca_certificate)?;
@@ -435,7 +435,7 @@ fn journal_to_device_log(
 
 fn start_journal_collector(identity: DeviceIdentity, log_sender: mpsc::Sender<DeviceLogMessage>) {
     std::thread::spawn(move || {
-        println!("Starting Linux systemd journal collector...");
+        //println!("Starting Linux systemd journal collector...");
         let mut child = match
             Command::new("journalctl")
                 .args(["-f", "-n", "0", "-o", "json"])
@@ -638,11 +638,11 @@ fn truncate_output(output: String) -> String {
 }
 
 fn execute_command(command: &str, current_dir: &mut PathBuf) -> (String, i32) {
-    println!("========================================");
-    println!("EXECUTING COMMAND");
-    println!("Command: {}", command);
-    println!("Current dir: {:?}", current_dir);
-    println!("========================================");
+    // println!("========================================");
+    // println!("EXECUTING COMMAND");
+    // println!("Command: {}", command);
+    // println!("Current dir: {:?}", current_dir);
+    // println!("========================================");
     let trimmed = command.trim();
     if trimmed == "cd" || trimmed.starts_with("cd ") {
         let target = if trimmed == "cd" {
@@ -696,15 +696,15 @@ async fn process_command(
     payload: &[u8],
     current_dir: &mut PathBuf
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("========================================");
-    println!("MQTT COMMAND RECEIVED");
-    println!("========================================");
+    //println!("========================================");
+    //println!("MQTT COMMAND RECEIVED");
+    //println!("========================================");
     let payload_string = String::from_utf8_lossy(payload);
-    println!("Payload: {}", payload_string);
+    //println!("Payload: {}", payload_string);
     let command: DeviceCommandMessage = serde_json::from_slice(payload)?;
-    println!("Command ID: {}", command.command_id);
-    println!("Device ID: {}", command.device_id);
-    println!("Command: {}", command.command);
+    //println!("Command ID: {}", command.command_id);
+    //println!("Device ID: {}", command.device_id);
+    //println!("Command: {}", command.command);
     publish_log(
         mqtt_client,
         identity,
@@ -747,10 +747,10 @@ async fn process_command(
     };
     let result_json = serde_json::to_string(&result)?;
     let topic = command_result_topic(identity);
-    println!("Publishing command result...");
-    println!("Result topic: {}", topic);
+    //println!("Publishing command result...");
+    //println!("Result topic: {}", topic);
     mqtt_client.publish(topic, QoS::AtLeastOnce, false, result_json.as_bytes()).await?;
-    println!("Command result published successfully.");
+    //println!("Command result published successfully.");
     Ok(())
 }
 
@@ -781,9 +781,9 @@ async fn publish_metrics(
     let metrics = collect_metrics(system, identity);
     let json = serde_json::to_string(&metrics)?;
     let topic = metrics_topic(identity);
-    println!("Sending metrics: {}", json);
+    //println!("Sending metrics: {}", json);
     mqtt_client.publish(topic, QoS::AtLeastOnce, false, json.as_bytes()).await?;
-    println!("Metrics published successfully.");
+    //println!("Metrics published successfully.");
     Ok(())
 }
 
@@ -798,10 +798,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let identity;
     if device_is_provisioned(&paths) {
-        println!("Existing device identity found.");
+        // println!("Existing device identity found.");
         identity = load_identity(&paths)?;
     } else {
-        println!("No device identity found.");
+        // println!("No device identity found.");
         let token = match get_token() {
             Ok(token) => token,
             Err(error) => {
@@ -814,10 +814,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mqtt_client, mut event_loop) = create_mqtt_client(&identity, &paths)?;
 
     let command_topic = command_topic(&identity);
-    println!("Subscribing to command topic:");
-    println!("{}", command_topic);
+    // println!("Subscribing to command topic:");
+    // println!("{}", command_topic);
     mqtt_client.subscribe(command_topic.clone(), QoS::AtLeastOnce).await?;
-    println!("Subscribe request sent.");
+    // println!("Subscribe request sent.");
     let (log_sender, log_receiver) = mpsc::channel::<DeviceLogMessage>(LOG_CHANNEL_SIZE);
     start_journal_collector(identity.clone(), log_sender);
     tokio::spawn(run_log_batcher(mqtt_client.clone(), identity.clone(), log_receiver));
@@ -829,7 +829,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ).await;
 
     let mut current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-    println!("Initial working directory: {:?}", current_dir);
+ //   println!("Initial working directory: {:?}", current_dir);
 
     let mut system = System::new_all();
     system.refresh_all();
@@ -845,9 +845,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Packet::Publish(publish)
                         )
                     ) => {
-                        println!("MQTT incoming publish received.");
-                        println!("Topic: {}",publish.topic
-                        );
+                        // // println!("MQTT incoming publish received.");
+                        // // println!("Topic: {}",publish.topic
+                        //);
                         if publish.topic == command_topic
                         {
                             if let Err(error) =
@@ -879,11 +879,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                    
                     Ok( Event::Incoming(Packet::ConnAck(connack))
                     ) => {
-                        println!(      "MQTT event: Incoming(ConnAck({:?}))",          connack
-                        );
-                        println!(
-                            "Re-subscribing to command topic after (re)connect..."
-                        );
+                      //  println!(      "MQTT event: Incoming(ConnAck({:?}))",          connack
+                        //);
+                        //println!(
+                        //    "Re-subscribing to command topic after (re)connect..."
+                        //);
                         if let Err(error) =
                             mqtt_client
                                 .subscribe(
@@ -909,18 +909,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(
                         Event::Incoming(packet)
                     ) => {
-                        println!(
-                            "MQTT event: Incoming({:?})",
-                            packet
-                        );
+                        // println!(
+                        //     "MQTT event: Incoming({:?})",
+                        //     packet
+                        // );
                     }
                     Ok(
                         Event::Outgoing(packet)
                     ) => {
-                        println!(
-                            "MQTT event: Outgoing({:?})",
-                            packet
-                        );
+                        // println!(
+                        //     "MQTT event: Outgoing({:?})",
+                        //     packet
+                        // );
                     }
                     Err(error) => {
                         eprintln!(
