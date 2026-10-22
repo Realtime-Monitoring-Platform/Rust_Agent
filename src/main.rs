@@ -1,31 +1,65 @@
 use std::env;
 use std::fs;
-use std::io::{ BufRead, BufReader };
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{ Command, Stdio };
-use std::time::{ Duration, SystemTime, UNIX_EPOCH };
+use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use local_ip_address::local_ip;
 use mac_address::get_mac_address;
 use openssl::hash::MessageDigest;
 use openssl::pkey::PKey;
 use openssl::rsa::Rsa;
-use openssl::x509::{ X509NameBuilder, X509Req };
+use openssl::x509::{X509NameBuilder, X509Req};
 use reqwest::Client;
-use rumqttc::{ AsyncClient, Event, MqttOptions, Packet, QoS, Transport };
-use serde::{ Deserialize, Serialize };
-use sysinfo::System;
+use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS, Transport};
+use serde::{Deserialize, Serialize};
+use sysinfo::{Components, Disks, Networks, System};
 use tokio::sync::mpsc;
 
+// ============================================================
+// CONFIGURATION
+// ============================================================
 const DEFAULT_DEVICE_SERVICE_BASE_URL: &str = "http://192.168.1.205:9005/api/v1/devices/provision";
 const DEFAULT_MQTT_HOST: &str = "192.168.1.122";
 const MQTT_PORT: u16 = 8883;
 const MQTT_KEEP_ALIVE_SECONDS: u64 = 30;
 const METRICS_INTERVAL_SECONDS: u64 = 5;
+
+// ------------------------------------------------------------
+// COMMAND OUTPUT
+// ------------------------------------------------------------
 const MAX_OUTPUT_BYTES: usize = 200_000;
+
+// ------------------------------------------------------------
+// LOGGING
+// ------------------------------------------------------------
 const MAX_LOG_BYTES: usize = 4_000;
 const LOG_BATCH_SIZE: usize = 100;
 const LOG_FLUSH_INTERVAL_SECONDS: u64 = 1;
 const LOG_CHANNEL_SIZE: usize = 10_000;
+
+// ============================================================
+// ENV HELPERS
+// ============================================================
+fn device_service_base_url() -> String {
+    env::var("MONITORING_DEVICE_SERVICE_URL")
+        .unwrap_or_else(|_| DEFAULT_DEVICE_SERVICE_BASE_URL.to_string())
+}
+
+fn mqtt_host() -> String {
+    env::var("MONITORING_MQTT_HOST").unwrap_or_else(|_| DEFAULT_MQTT_HOST.to_string())
+}
+
+fn mqtt_port() -> u16 {
+    env::var("MONITORING_MQTT_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(MQTT_PORT)
+}
+
+// ============================================================
+// DEVICE SYSTEM INFO
+// ============================================================
 #[derive(Debug, Serialize, Clone)]
 struct DeviceSystemInfo {
     hostname: String,
@@ -45,6 +79,9 @@ struct DeviceSystemInfo {
     total_memory_kb: u64,
 }
 
+// ============================================================
+// PROVISIONING REQUEST / RESPONSE
+// ============================================================
 #[derive(Serialize)]
 struct ProvisionRequest {
     csr: String,
@@ -64,12 +101,18 @@ struct ProvisionResponse {
     tenant_id: String,
 }
 
+// ============================================================
+// DEVICE IDENTITY
+// ============================================================
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct DeviceIdentity {
     device_id: String,
     tenant_id: String,
 }
 
+// ============================================================
+// MQTT COMMAND / RESULT
+// ============================================================
 #[derive(Debug, Deserialize)]
 struct DeviceCommandMessage {
     #[serde(rename = "commandId")]
@@ -91,14 +134,62 @@ struct CommandResultMessage {
     exit_code: i32,
 }
 
+// ============================================================
+// METRICS
+// ============================================================
 #[derive(Debug, Serialize)]
 struct DeviceMetrics {
     device_id: String,
     tenant_id: String,
     cpu: f32,
     ram: f32,
+    memory: MemoryMetrics,
+    disks: Vec<DiskMetrics>,
+    network: Vec<NetworkMetrics>,
+    temperatures: Vec<TemperatureMetrics>,
 }
 
+#[derive(Debug, Serialize)]
+struct MemoryMetrics {
+    total_kb: u64,
+    used_kb: u64,
+    free_kb: u64,
+    available_kb: u64,
+    swap_total_kb: u64,
+    swap_used_kb: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct DiskMetrics {
+    name: String,
+    mount_point: String,
+    file_system: String,
+    total_bytes: u64,
+    available_bytes: u64,
+    used_bytes: u64,
+    used_percent: f32,
+    read_bytes: u64,
+    written_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct NetworkMetrics {
+    interface: String,
+    received_bytes: u64,
+    transmitted_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct TemperatureMetrics {
+    label: String,
+    temperature: f32,
+    max: Option<f32>,
+    critical: Option<f32>,
+}
+
+// ============================================================
+// LOG ENTRY / BATCH
+// ============================================================
 #[derive(Debug, Clone, Serialize)]
 struct DeviceLogMessage {
     device_id: String,
@@ -118,6 +209,9 @@ struct DeviceLogBatch {
     logs: Vec<DeviceLogMessage>,
 }
 
+// ============================================================
+// JOURNAL JSON ENTRY
+// ============================================================
 #[derive(Debug, Deserialize)]
 struct JournalEntry {
     #[serde(rename = "__REALTIME_TIMESTAMP")]
@@ -134,23 +228,9 @@ struct JournalEntry {
     executable: Option<String>,
 }
 
-fn device_service_base_url() -> String {
-    env::var("MONITORING_DEVICE_SERVICE_URL").unwrap_or_else(|_|
-        DEFAULT_DEVICE_SERVICE_BASE_URL.to_string()
-    )
-}
-
-fn mqtt_host() -> String {
-    env::var("MONITORING_MQTT_HOST").unwrap_or_else(|_| DEFAULT_MQTT_HOST.to_string())
-}
-
-fn mqtt_port() -> u16 {
-    env::var("MONITORING_MQTT_PORT")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(MQTT_PORT)
-}
-
+// ============================================================
+// CURRENT TIME
+// ============================================================
 fn now_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -158,6 +238,9 @@ fn now_millis() -> u128 {
         .unwrap_or(0)
 }
 
+// ============================================================
+// DEVICE PATHS
+// ============================================================
 struct AgentPaths {
     agent_directory: PathBuf,
     pki_directory: PathBuf,
@@ -183,6 +266,9 @@ fn build_paths() -> Result<AgentPaths, Box<dyn std::error::Error>> {
     })
 }
 
+// ============================================================
+// GET PROVISIONING TOKEN (only needed when not provisioned)
+// ============================================================
 fn get_token() -> Result<String, String> {
     let args: Vec<String> = env::args().collect();
     if args.len() == 1 {
@@ -201,6 +287,9 @@ fn get_token() -> Result<String, String> {
     Err("Usage: --token <provisioning-token>".to_string())
 }
 
+// ============================================================
+// COLLECT DEVICE SYSTEM INFO
+// ============================================================
 fn collect_device_info() -> DeviceSystemInfo {
     let hostname = System::host_name().unwrap_or_else(|| "unknown".to_string());
     let ip_address = local_ip()
@@ -228,6 +317,9 @@ fn collect_device_info() -> DeviceSystemInfo {
     }
 }
 
+// ============================================================
+// CREATE DEVICE KEY / CSR
+// ============================================================
 fn generate_private_key() -> Result<PKey<openssl::pkey::Private>, Box<dyn std::error::Error>> {
     let rsa = Rsa::generate(2048)?;
     let private_key = PKey::from_rsa(rsa)?;
@@ -236,7 +328,7 @@ fn generate_private_key() -> Result<PKey<openssl::pkey::Private>, Box<dyn std::e
 
 fn generate_csr(
     private_key: &PKey<openssl::pkey::Private>,
-    device_name: &str
+    device_name: &str,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut name_builder = X509NameBuilder::new()?;
     name_builder.append_entry_by_text("CN", device_name)?;
@@ -251,7 +343,7 @@ fn generate_csr(
 
 fn save_private_key(
     path: &PathBuf,
-    private_key: &PKey<openssl::pkey::Private>
+    private_key: &PKey<openssl::pkey::Private>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pem = private_key.private_key_to_pem_pkcs8()?;
     fs::write(path, pem)?;
@@ -260,74 +352,98 @@ fn save_private_key(
 
 fn save_identity(
     path: &PathBuf,
-    identity: &DeviceIdentity
+    identity: &DeviceIdentity,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let json = serde_json::to_string_pretty(identity)?;
     fs::write(path, json)?;
     Ok(())
 }
 
+// ============================================================
+// PROVISION DEVICE  (token in path + Bearer header)
+// ============================================================
 async fn provision_device(
     paths: &AgentPaths,
-    token: &str
+    token: &str,
 ) -> Result<DeviceIdentity, Box<dyn std::error::Error>> {
-    //println!("========================================");
-    //println!("Starting device provisioning");
-    //println!("========================================");
+    println!("========================================");
+    println!("Starting device provisioning");
+    println!("========================================");
+
     fs::create_dir_all(&paths.agent_directory)?;
     fs::create_dir_all(&paths.pki_directory)?;
-    //println!("Generating device private key...");
+
+    println!("Generating device private key...");
     let private_key = generate_private_key()?;
     save_private_key(&paths.device_key, &private_key)?;
-    //println!("Private key saved to {:?}", paths.device_key);
-    //println!("Generating CSR...");
+    println!("Private key saved to {:?}", paths.device_key);
+
+    println!("Generating CSR...");
     let csr = generate_csr(&private_key, "monitoring-device")?;
     fs::write(&paths.device_csr, &csr)?;
-    //println!("CSR saved to {:?}", paths.device_csr);
+    println!("CSR saved to {:?}", paths.device_csr);
+
     let csr_string = String::from_utf8(csr)?;
-    //println!("Collecting device system info...");
+    println!("Collecting device system info...");
     let device_info = collect_device_info();
-    //println!("Hostname: {}", device_info.hostname);
-    //println!("IP address: {}", device_info.ip_address);
-    //println!("MAC address: {}", device_info.mac_address);
-    //println!("OS: {} {}", device_info.os_name, device_info.os_version);
-    //println!("Kernel: {}", device_info.kernel_version);
-    //println!("CPU count: {}", device_info.cpu_count);
-    //println!("Total memory (KB): {}", device_info.total_memory_kb);
+    println!("Hostname: {}", device_info.hostname);
+    println!("IP address: {}", device_info.ip_address);
+    println!("MAC address: {}", device_info.mac_address);
+    println!("OS: {} {}", device_info.os_name, device_info.os_version);
+    println!("Kernel: {}", device_info.kernel_version);
+    println!("CPU count: {}", device_info.cpu_count);
+    println!("Total memory (KB): {}", device_info.total_memory_kb);
+
     let request = ProvisionRequest {
         csr: csr_string,
         device_info,
     };
-    let device_service_url = device_service_base_url();
-    //println!("Sending provisioning request to {}", device_service_url);
+
+    let base_url = device_service_base_url();
+    let provision_url = format!("{}/{}", base_url, token);
+    println!("Sending provisioning request to {}", provision_url);
+
     let client = Client::new();
     let response = client
-        .post(format!("{}/{}", device_service_url, token))
+        .post(&provision_url)
         .header("Authorization", format!("Bearer {}", token))
         .json(&request)
-        .send().await?;
-    //println!("Provisioning HTTP status: {}", response.status());
+        .send()
+        .await?;
+
+    println!("Provisioning HTTP status: {}", response.status());
     if !response.status().is_success() {
         let body = response.text().await?;
         return Err(format!("Provisioning failed: {}", body).into());
     }
+
     let provision_response: ProvisionResponse = response.json().await?;
-  //  println!("Provisioning successful.");
-  //  println!("Device ID: {}", provision_response.device_id);
-   // println!("Tenant ID: {}", provision_response.tenant_id);
+    println!("Provisioning successful.");
+    println!("Device ID: {}", provision_response.device_id);
+    println!("Tenant ID: {}", provision_response.tenant_id);
+
     fs::write(&paths.ca_certificate, provision_response.ca_certificate.as_bytes())?;
-    fs::write(&paths.device_certificate, provision_response.client_certificate.as_bytes())?;
+    fs::write(
+        &paths.device_certificate,
+        provision_response.client_certificate.as_bytes(),
+    )?;
+
     let identity = DeviceIdentity {
         device_id: provision_response.device_id,
         tenant_id: provision_response.tenant_id,
     };
     save_identity(&paths.identity, &identity)?;
-//    println!("CA certificate saved to {:?}", paths.ca_certificate);
-  //  println!("Device certificate saved to {:?}", paths.device_certificate);
-   // println!("Identity saved to {:?}", paths.identity);
+
+    println!("CA certificate saved to {:?}", paths.ca_certificate);
+    println!("Device certificate saved to {:?}", paths.device_certificate);
+    println!("Identity saved to {:?}", paths.identity);
+
     Ok(identity)
 }
 
+// ============================================================
+// LOAD EXISTING IDENTITY / CHECK PROVISIONING
+// ============================================================
 fn load_identity(paths: &AgentPaths) -> Result<DeviceIdentity, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(&paths.identity)?;
     let identity: DeviceIdentity = serde_json::from_str(&content)?;
@@ -335,10 +451,10 @@ fn load_identity(paths: &AgentPaths) -> Result<DeviceIdentity, Box<dyn std::erro
 }
 
 fn device_is_provisioned(paths: &AgentPaths) -> bool {
-    paths.identity.exists() &&
-        paths.ca_certificate.exists() &&
-        paths.device_certificate.exists() &&
-        paths.device_key.exists()
+    paths.identity.exists()
+        && paths.ca_certificate.exists()
+        && paths.device_certificate.exists()
+        && paths.device_key.exists()
 }
 
 fn load_certificate(path: &PathBuf) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -346,43 +462,72 @@ fn load_certificate(path: &PathBuf) -> Result<Vec<u8>, Box<dyn std::error::Error
     Ok(data)
 }
 
+// ============================================================
+// CREATE MQTT CLIENT
+// ============================================================
 fn create_mqtt_client(
     identity: &DeviceIdentity,
-    paths: &AgentPaths
+    paths: &AgentPaths,
 ) -> Result<(AsyncClient, rumqttc::EventLoop), Box<dyn std::error::Error>> {
-   // println!("========================================");
-    //println!("Creating MQTT client...");
-    //println!("========================================");
+    println!("========================================");
+    println!("Creating MQTT client...");
+    println!("========================================");
+
     let client_id = format!("monitoring-agent-{}", identity.device_id);
-    //println!("MQTT Client ID: {}", client_id);
+    println!("MQTT Client ID: {}", client_id);
+
     let host = mqtt_host();
     let port = mqtt_port();
-    //println!("Connecting to MQTT broker {}:{}", host, port);
+    println!("Connecting to MQTT broker {}:{}", host, port);
+
     let mut mqtt_options = MqttOptions::new(client_id, host, port);
     mqtt_options.set_keep_alive(Duration::from_secs(MQTT_KEEP_ALIVE_SECONDS));
+
     let ca = load_certificate(&paths.ca_certificate)?;
     let client_cert = load_certificate(&paths.device_certificate)?;
     let private_key = load_certificate(&paths.device_key)?;
+
     let transport = Transport::tls(ca, Some((client_cert, private_key)), None);
     mqtt_options.set_transport(transport);
+
     let (client, event_loop) = AsyncClient::new(mqtt_options, 100);
     Ok((client, event_loop))
 }
 
+// ============================================================
+// MQTT TOPICS
+// ============================================================
 fn command_topic(identity: &DeviceIdentity) -> String {
-    format!("tenants/{}/devices/{}/commands", identity.tenant_id, identity.device_id)
+    format!(
+        "tenants/{}/devices/{}/commands",
+        identity.tenant_id, identity.device_id
+    )
 }
+
 fn metrics_topic(identity: &DeviceIdentity) -> String {
-    format!("tenants/{}/devices/{}/metrics", identity.tenant_id, identity.device_id)
+    format!(
+        "tenants/{}/devices/{}/metrics",
+        identity.tenant_id, identity.device_id
+    )
 }
+
 fn command_result_topic(identity: &DeviceIdentity) -> String {
-    format!("tenants/{}/devices/{}/command-results", identity.tenant_id, identity.device_id)
+    format!(
+        "tenants/{}/devices/{}/command-results",
+        identity.tenant_id, identity.device_id
+    )
 }
 
 fn logs_topic(identity: &DeviceIdentity) -> String {
-    format!("tenants/{}/devices/{}/logs", identity.tenant_id, identity.device_id)
+    format!(
+        "tenants/{}/devices/{}/logs",
+        identity.tenant_id, identity.device_id
+    )
 }
 
+// ============================================================
+// NORMALIZE LOG LEVEL
+// ============================================================
 fn normalize_log_level(priority: Option<&str>) -> String {
     match priority {
         Some("0") => "FATAL".to_string(),
@@ -397,14 +542,18 @@ fn normalize_log_level(priority: Option<&str>) -> String {
     }
 }
 
+// ============================================================
+// CREATE LOG ENTRY FROM JOURNAL ENTRY
+// ============================================================
 fn journal_to_device_log(
     entry: JournalEntry,
-    identity: &DeviceIdentity
+    identity: &DeviceIdentity,
 ) -> Option<DeviceLogMessage> {
     let message = entry.message?;
     if message.trim().is_empty() {
         return None;
     }
+
     let mut message = message;
     if message.len() > MAX_LOG_BYTES {
         let mut cut = MAX_LOG_BYTES;
@@ -414,14 +563,19 @@ fn journal_to_device_log(
         message.truncate(cut);
         message.push_str(" [truncated]");
     }
-    let service = entry.systemd_unit
+
+    let service = entry
+        .systemd_unit
         .or(entry.command)
         .or(entry.executable)
         .unwrap_or_else(|| "unknown".to_string());
-    let timestamp = entry.realtime_timestamp
+
+    let timestamp = entry
+        .realtime_timestamp
         .and_then(|value| value.parse::<u128>().ok())
         .map(|micros| micros / 1000)
         .unwrap_or_else(now_millis);
+
     Some(DeviceLogMessage {
         device_id: identity.device_id.clone(),
         tenant_id: identity.tenant_id.clone(),
@@ -433,15 +587,20 @@ fn journal_to_device_log(
     })
 }
 
-fn start_journal_collector(identity: DeviceIdentity, log_sender: mpsc::Sender<DeviceLogMessage>) {
+// ============================================================
+// JOURNAL COLLECTOR
+// ============================================================
+fn start_journal_collector(
+    identity: DeviceIdentity,
+    log_sender: mpsc::Sender<DeviceLogMessage>,
+) {
     std::thread::spawn(move || {
-        //println!("Starting Linux systemd journal collector...");
-        let mut child = match
-            Command::new("journalctl")
-                .args(["-f", "-n", "0", "-o", "json"])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
+        println!("Starting Linux systemd journal collector...");
+        let mut child = match Command::new("journalctl")
+            .args(["-f", "-n", "0", "-o", "json"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
         {
             Ok(child) => child,
             Err(error) => {
@@ -449,6 +608,7 @@ fn start_journal_collector(identity: DeviceIdentity, log_sender: mpsc::Sender<De
                 return;
             }
         };
+
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
@@ -456,6 +616,7 @@ fn start_journal_collector(identity: DeviceIdentity, log_sender: mpsc::Sender<De
                 return;
             }
         };
+
         let reader = BufReader::new(stdout);
         for line_result in reader.lines() {
             let line = match line_result {
@@ -465,9 +626,11 @@ fn start_journal_collector(identity: DeviceIdentity, log_sender: mpsc::Sender<De
                     continue;
                 }
             };
+
             if line.trim().is_empty() {
                 continue;
             }
+
             let journal_entry: JournalEntry = match serde_json::from_str(&line) {
                 Ok(entry) => entry,
                 Err(error) => {
@@ -475,12 +638,12 @@ fn start_journal_collector(identity: DeviceIdentity, log_sender: mpsc::Sender<De
                     continue;
                 }
             };
+
             let log = match journal_to_device_log(journal_entry, &identity) {
                 Some(log) => log,
-                None => {
-                    continue;
-                }
+                None => continue,
             };
+
             match log_sender.try_send(log) {
                 Ok(_) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
@@ -492,83 +655,72 @@ fn start_journal_collector(identity: DeviceIdentity, log_sender: mpsc::Sender<De
                 }
             }
         }
+
         let _ = child.kill();
         println!("Systemd journal collector stopped.");
     });
 }
 
+// ============================================================
+// LOG BATCHER
+// ============================================================
 async fn run_log_batcher(
     mqtt_client: AsyncClient,
     identity: DeviceIdentity,
-    mut log_receiver: mpsc::Receiver<DeviceLogMessage>
+    mut log_receiver: mpsc::Receiver<DeviceLogMessage>,
 ) {
     println!("Log batcher started.");
     let mut buffer: Vec<DeviceLogMessage> = Vec::with_capacity(LOG_BATCH_SIZE);
-    let mut flush_interval = tokio::time::interval(Duration::from_secs(LOG_FLUSH_INTERVAL_SECONDS));
+    let mut flush_interval =
+        tokio::time::interval(Duration::from_secs(LOG_FLUSH_INTERVAL_SECONDS));
+
     loop {
         tokio::select! {
-           
-            log =
-                log_receiver.recv() => {
+            log = log_receiver.recv() => {
                 match log {
                     Some(log) => {
                         buffer.push(log);
-                        if buffer.len()
-                            >= LOG_BATCH_SIZE
-                        {
-                            publish_log_batch(
-                                &mqtt_client,
-                                &identity,
-                                &mut buffer,
-                            )
-                            .await;
+                        if buffer.len() >= LOG_BATCH_SIZE {
+                            publish_log_batch(&mqtt_client, &identity, &mut buffer).await;
                         }
                     }
                     None => {
-                        println!(
-                            "Log channel closed."
-                        );
+                        println!("Log channel closed.");
                         if !buffer.is_empty() {
-                            publish_log_batch(
-                                &mqtt_client,
-                                &identity,
-                                &mut buffer,
-                            )
-                            .await;
+                            publish_log_batch(&mqtt_client, &identity, &mut buffer).await;
                         }
                         break;
                     }
                 }
             }
-            _ =
-                flush_interval.tick() => {
+            _ = flush_interval.tick() => {
                 if !buffer.is_empty() {
-                    publish_log_batch(
-                        &mqtt_client,
-                        &identity,
-                        &mut buffer,
-                    )
-                    .await;
+                    publish_log_batch(&mqtt_client, &identity, &mut buffer).await;
                 }
             }
         }
     }
 }
 
+// ============================================================
+// PUBLISH LOG BATCH
+// ============================================================
 async fn publish_log_batch(
     mqtt_client: &AsyncClient,
     identity: &DeviceIdentity,
-    buffer: &mut Vec<DeviceLogMessage>
+    buffer: &mut Vec<DeviceLogMessage>,
 ) {
     if buffer.is_empty() {
         return;
     }
+
     let logs = std::mem::take(buffer);
     let batch = DeviceLogBatch {
         device_id: identity.device_id.clone(),
         tenant_id: identity.tenant_id.clone(),
         logs,
     };
+
     let json = match serde_json::to_string(&batch) {
         Ok(json) => json,
         Err(error) => {
@@ -576,18 +728,26 @@ async fn publish_log_batch(
             return;
         }
     };
+
     let topic = logs_topic(identity);
     println!("Publishing {} logs to {}", batch.logs.len(), topic);
-    if let Err(error) = mqtt_client.publish(topic, QoS::AtLeastOnce, false, json.as_bytes()).await {
+
+    if let Err(error) = mqtt_client
+        .publish(topic, QoS::AtLeastOnce, false, json.as_bytes())
+        .await
+    {
         eprintln!("Failed to publish log batch: {}", error);
     }
 }
 
+// ============================================================
+// AGENT INTERNAL LOG
+// ============================================================
 async fn publish_log(
     mqtt_client: &AsyncClient,
     identity: &DeviceIdentity,
     level: &str,
-    message: impl Into<String>
+    message: impl Into<String>,
 ) {
     let mut message = message.into();
     if message.len() > MAX_LOG_BYTES {
@@ -598,7 +758,15 @@ async fn publish_log(
         message.truncate(cut);
         message.push_str(" [truncated]");
     }
-    println!("[{}] {} | device={} | {}", level, now_millis(), identity.device_id, message);
+
+    println!(
+        "[{}] {} | device={} | {}",
+        level,
+        now_millis(),
+        identity.device_id,
+        message
+    );
+
     let log = DeviceLogMessage {
         device_id: identity.device_id.clone(),
         tenant_id: identity.tenant_id.clone(),
@@ -608,6 +776,7 @@ async fn publish_log(
         message,
         timestamp_millis: now_millis(),
     };
+
     let topic = logs_topic(identity);
     let json = match serde_json::to_string(&log) {
         Ok(json) => json,
@@ -616,11 +785,18 @@ async fn publish_log(
             return;
         }
     };
-    if let Err(error) = mqtt_client.publish(topic, QoS::AtLeastOnce, false, json.as_bytes()).await {
+
+    if let Err(error) = mqtt_client
+        .publish(topic, QoS::AtLeastOnce, false, json.as_bytes())
+        .await
+    {
         eprintln!("Failed to publish agent log: {}", error);
     }
 }
 
+// ============================================================
+// TRUNCATE OUTPUT
+// ============================================================
 fn truncate_output(output: String) -> String {
     if output.len() <= MAX_OUTPUT_BYTES {
         return output;
@@ -637,12 +813,16 @@ fn truncate_output(output: String) -> String {
     )
 }
 
+// ============================================================
+// EXECUTE COMMAND
+// ============================================================
 fn execute_command(command: &str, current_dir: &mut PathBuf) -> (String, i32) {
-    // println!("========================================");
-    // println!("EXECUTING COMMAND");
-    // println!("Command: {}", command);
-    // println!("Current dir: {:?}", current_dir);
-    // println!("========================================");
+    println!("========================================");
+    println!("EXECUTING COMMAND");
+    println!("Command: {}", command);
+    println!("Current dir: {:?}", current_dir);
+    println!("========================================");
+
     let trimmed = command.trim();
     if trimmed == "cd" || trimmed.starts_with("cd ") {
         let target = if trimmed == "cd" {
@@ -666,14 +846,25 @@ fn execute_command(command: &str, current_dir: &mut PathBuf) -> (String, i32) {
                 }
             }
         };
+
         if !target.is_dir() {
-            return (format!("cd: {}: Not a directory", target.display()), 1);
+            return (
+                format!("cd: {}: Not a directory", target.display()),
+                1,
+            );
         }
+
         *current_dir = target;
         println!("Changed directory to {:?}", current_dir);
         return (String::new(), 0);
     }
-    match Command::new("sh").arg("-c").arg(command).current_dir(&*current_dir).output() {
+
+    match Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(&*current_dir)
+        .output()
+    {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -690,54 +881,64 @@ fn execute_command(command: &str, current_dir: &mut PathBuf) -> (String, i32) {
     }
 }
 
+// ============================================================
+// PROCESS MQTT COMMAND
+// ============================================================
 async fn process_command(
     mqtt_client: &AsyncClient,
     identity: &DeviceIdentity,
     payload: &[u8],
-    current_dir: &mut PathBuf
+    current_dir: &mut PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    //println!("========================================");
-    //println!("MQTT COMMAND RECEIVED");
-    //println!("========================================");
+    println!("========================================");
+    println!("MQTT COMMAND RECEIVED");
+    println!("========================================");
+
     let payload_string = String::from_utf8_lossy(payload);
-    //println!("Payload: {}", payload_string);
+    println!("Payload: {}", payload_string);
+
     let command: DeviceCommandMessage = serde_json::from_slice(payload)?;
-    //println!("Command ID: {}", command.command_id);
-    //println!("Device ID: {}", command.device_id);
-    //println!("Command: {}", command.command);
+    println!("Command ID: {}", command.command_id);
+    println!("Device ID: {}", command.device_id);
+    println!("Command: {}", command.command);
+
     publish_log(
         mqtt_client,
         identity,
         "INFO",
-        format!("Received command '{}' (commandId={})", command.command, command.command_id)
-    ).await;
+        format!(
+            "Received command '{}' (commandId={})",
+            command.command, command.command_id
+        ),
+    )
+    .await;
+
     if command.device_id != identity.device_id {
         println!("WARNING: Command device ID does not match this device.");
         publish_log(
             mqtt_client,
             identity,
             "WARN",
-            format!("Rejected command {}: deviceId mismatch", command.command_id)
-        ).await;
+            format!("Rejected command {}: deviceId mismatch", command.command_id),
+        )
+        .await;
         return Ok(());
     }
+
     let (output, exit_code) = execute_command(&command.command, current_dir);
     let status = if exit_code == 0 { "SUCCESS" } else { "FAILED" };
+
     publish_log(
         mqtt_client,
         identity,
-        if exit_code == 0 {
-            "INFO"
-        } else {
-            "ERROR"
-        },
+        if exit_code == 0 { "INFO" } else { "ERROR" },
         format!(
             "Command '{}' (commandId={}) finished with exit code {}",
-            command.command,
-            command.command_id,
-            exit_code
-        )
-    ).await;
+            command.command, command.command_id, exit_code
+        ),
+    )
+    .await;
+
     let result = CommandResultMessage {
         command_id: command.command_id,
         device_id: command.device_id,
@@ -745,63 +946,183 @@ async fn process_command(
         stdout: output,
         exit_code,
     };
+
     let result_json = serde_json::to_string(&result)?;
     let topic = command_result_topic(identity);
-    //println!("Publishing command result...");
-    //println!("Result topic: {}", topic);
-    mqtt_client.publish(topic, QoS::AtLeastOnce, false, result_json.as_bytes()).await?;
-    //println!("Command result published successfully.");
+    println!("Publishing command result...");
+    println!("Result topic: {}", topic);
+
+    mqtt_client
+        .publish(topic, QoS::AtLeastOnce, false, result_json.as_bytes())
+        .await?;
+
+    println!("Command result published successfully.");
     Ok(())
 }
 
-fn collect_metrics(system: &mut System, identity: &DeviceIdentity) -> DeviceMetrics {
+// ============================================================
+// COLLECT METRICS (full version)
+// ============================================================
+fn collect_metrics(
+    system: &mut System,
+    disks: &mut Disks,
+    networks: &mut Networks,
+    components: &mut Components,
+    identity: &DeviceIdentity,
+) -> DeviceMetrics {
+    // CPU + Memory
     system.refresh_cpu_usage();
     system.refresh_memory();
+
     let cpu = system.global_cpu_usage();
     let total_memory = system.total_memory();
     let used_memory = system.used_memory();
+    let free_memory = system.free_memory();
+    let available_memory = system.available_memory();
+    let total_swap = system.total_swap();
+    let used_swap = system.used_swap();
+
     let ram = if total_memory > 0 {
-        ((used_memory as f32) / (total_memory as f32)) * 100.0
+        (used_memory as f32 / total_memory as f32) * 100.0
     } else {
         0.0
     };
+
+    // Disks / Filesystems
+    disks.refresh(true);
+    let disk_metrics: Vec<DiskMetrics> = disks
+        .list()
+        .iter()
+        .map(|disk| {
+            let total = disk.total_space();
+            let available = disk.available_space();
+            let used = total.saturating_sub(available);
+            let used_percent = if total > 0 {
+                (used as f32 / total as f32) * 100.0
+            } else {
+                0.0
+            };
+            let usage = disk.usage();
+            DiskMetrics {
+                name: disk.name().to_string_lossy().into_owned(),
+                mount_point: disk.mount_point().to_string_lossy().into_owned(),
+                file_system: disk.file_system().to_string_lossy().into_owned(),
+                total_bytes: total,
+                available_bytes: available,
+                used_bytes: used,
+                used_percent,
+                read_bytes: usage.read_bytes,
+                written_bytes: usage.written_bytes,
+            }
+        })
+        .collect();
+
+    // Network
+    networks.refresh(true);
+    let network_metrics: Vec<NetworkMetrics> = networks
+        .iter()
+        .map(|(name, data)| NetworkMetrics {
+            interface: name.clone(),
+            received_bytes: data.total_received(),
+            transmitted_bytes: data.total_transmitted(),
+        })
+        .collect();
+
+    // Temperatures
+    components.refresh(true);
+    let temperature_metrics: Vec<TemperatureMetrics> = components
+        .iter()
+        .filter_map(|component| {
+            let temp = component.temperature()?;
+            if temp <= 0.0 {
+                return None;
+            }
+            Some(TemperatureMetrics {
+                label: component.label().to_string(),
+                temperature: temp,
+                max: component.max().filter(|&v| v > 0.0),
+                critical: component.critical().filter(|&v| v > 0.0),
+            })
+        })
+        .collect();
+
     DeviceMetrics {
         device_id: identity.device_id.clone(),
         tenant_id: identity.tenant_id.clone(),
         cpu,
         ram,
+        memory: MemoryMetrics {
+            total_kb: total_memory,
+            used_kb: used_memory,
+            free_kb: free_memory,
+            available_kb: available_memory,
+            swap_total_kb: total_swap,
+            swap_used_kb: used_swap,
+        },
+        disks: disk_metrics,
+        network: network_metrics,
+        temperatures: temperature_metrics,
     }
 }
 
+// ============================================================
+// PUBLISH METRICS
+// ============================================================
 async fn publish_metrics(
     mqtt_client: &AsyncClient,
     identity: &DeviceIdentity,
-    system: &mut System
+    system: &mut System,
+    disks: &mut Disks,
+    networks: &mut Networks,
+    components: &mut Components,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let metrics = collect_metrics(system, identity);
+    let metrics = collect_metrics(system, disks, networks, components, identity);
     let json = serde_json::to_string(&metrics)?;
     let topic = metrics_topic(identity);
-    //println!("Sending metrics: {}", json);
-    mqtt_client.publish(topic, QoS::AtLeastOnce, false, json.as_bytes()).await?;
-    //println!("Metrics published successfully.");
+    println!("Sending metrics: {}", json);
+
+    mqtt_client
+        .publish(topic, QoS::AtLeastOnce, false, json.as_bytes())
+        .await?;
+
+    println!("Metrics published successfully.");
     Ok(())
 }
 
+// ============================================================
+// MAIN
+// ============================================================
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    rustls::crypto::ring
-        ::default_provider()
+    // --------------------------------------------------------
+    // RUSTLS CRYPTO PROVIDER
+    // --------------------------------------------------------
+    rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install Rustls crypto provider");
 
+    // --------------------------------------------------------
+    // START
+    // --------------------------------------------------------
+    println!("========================================");
+    println!("Monitoring Agent Starting");
+    println!("========================================");
+
+    // --------------------------------------------------------
+    // BUILD PATHS
+    // --------------------------------------------------------
     let paths = build_paths()?;
 
+    // --------------------------------------------------------
+    // PROVISION OR LOAD IDENTITY
+    // (token is only required when not already provisioned)
+    // --------------------------------------------------------
     let identity;
     if device_is_provisioned(&paths) {
-        // println!("Existing device identity found.");
+        println!("Existing device identity found.");
         identity = load_identity(&paths)?;
     } else {
-        // println!("No device identity found.");
+        println!("No device identity found.");
         let token = match get_token() {
             Ok(token) => token,
             Err(error) => {
@@ -811,91 +1132,123 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         identity = provision_device(&paths, &token).await?;
     }
+
+    // --------------------------------------------------------
+    // PRINT IDENTITY
+    // --------------------------------------------------------
+    println!("========================================");
+    println!("DEVICE ID: {}", identity.device_id);
+    println!("TENANT ID: {}", identity.tenant_id);
+    println!("========================================");
+
+    // --------------------------------------------------------
+    // CREATE MQTT CLIENT
+    // --------------------------------------------------------
     let (mqtt_client, mut event_loop) = create_mqtt_client(&identity, &paths)?;
 
+    // --------------------------------------------------------
+    // COMMAND TOPIC
+    // --------------------------------------------------------
     let command_topic = command_topic(&identity);
-    // println!("Subscribing to command topic:");
-    // println!("{}", command_topic);
-    mqtt_client.subscribe(command_topic.clone(), QoS::AtLeastOnce).await?;
-    // println!("Subscribe request sent.");
+    println!("Subscribing to command topic:");
+    println!("{}", command_topic);
+    mqtt_client
+        .subscribe(command_topic.clone(), QoS::AtLeastOnce)
+        .await?;
+    println!("Subscribe request sent.");
+
+    // --------------------------------------------------------
+    // LOG CHANNEL
+    // --------------------------------------------------------
     let (log_sender, log_receiver) = mpsc::channel::<DeviceLogMessage>(LOG_CHANNEL_SIZE);
+
+    // --------------------------------------------------------
+    // START JOURNAL COLLECTOR
+    // --------------------------------------------------------
     start_journal_collector(identity.clone(), log_sender);
-    tokio::spawn(run_log_batcher(mqtt_client.clone(), identity.clone(), log_receiver));
+
+    // --------------------------------------------------------
+    // START LOG BATCHER
+    // --------------------------------------------------------
+    tokio::spawn(run_log_batcher(
+        mqtt_client.clone(),
+        identity.clone(),
+        log_receiver,
+    ));
+
+    // --------------------------------------------------------
+    // AGENT START LOG
+    // --------------------------------------------------------
     publish_log(
         &mqtt_client,
         &identity,
         "INFO",
-        "Monitoring agent started and log collector initialized"
-    ).await;
+        "Monitoring agent started and log collector initialized",
+    )
+    .await;
 
+    // --------------------------------------------------------
+    // PERSISTENT WORKING DIRECTORY
+    // --------------------------------------------------------
     let mut current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
- //   println!("Initial working directory: {:?}", current_dir);
+    println!("Initial working directory: {:?}", current_dir);
 
+    // --------------------------------------------------------
+    // SYSTEM METRICS
+    // --------------------------------------------------------
     let mut system = System::new_all();
     system.refresh_all();
+    let mut disks = Disks::new_with_refreshed_list();
+    let mut networks = Networks::new_with_refreshed_list();
+    let mut components = Components::new_with_refreshed_list();
 
-    let mut metrics_interval = tokio::time::interval(Duration::from_secs(METRICS_INTERVAL_SECONDS));
+    // --------------------------------------------------------
+    // METRICS TIMER
+    // --------------------------------------------------------
+    let mut metrics_interval =
+        tokio::time::interval(Duration::from_secs(METRICS_INTERVAL_SECONDS));
+
+    // --------------------------------------------------------
+    // MQTT EVENT LOOP
+    // --------------------------------------------------------
     loop {
         tokio::select! {
-            event =
-                event_loop.poll() => {
+            // =================================================
+            // MQTT
+            // =================================================
+            event = event_loop.poll() => {
                 match event {
-                    Ok(
-                        Event::Incoming(
-                            Packet::Publish(publish)
-                        )
-                    ) => {
-                        // // println!("MQTT incoming publish received.");
-                        // // println!("Topic: {}",publish.topic
-                        //);
-                        if publish.topic == command_topic
-                        {
-                            if let Err(error) =
-                                process_command(
-                                    &mqtt_client,
-                                    &identity,
-                                    &publish.payload,
-                                    &mut current_dir,
-                                )
-                                .await
+                    Ok(Event::Incoming(Packet::Publish(publish))) => {
+                        println!("MQTT incoming publish received.");
+                        println!("Topic: {}", publish.topic);
+                        if publish.topic == command_topic {
+                            if let Err(error) = process_command(
+                                &mqtt_client,
+                                &identity,
+                                &publish.payload,
+                                &mut current_dir,
+                            )
+                            .await
                             {
-                                eprintln!(
-                                    "Failed to process command: {}",
-                                    error
-                                );
+                                eprintln!("Failed to process command: {}", error);
                                 publish_log(
                                     &mqtt_client,
                                     &identity,
                                     "ERROR",
-                                    format!(
-                                        "Failed to process command: {}",
-                                        error
-                                    ),
+                                    format!("Failed to process command: {}", error),
                                 )
                                 .await;
                             }
                         }
                     }
-                   
-                    Ok( Event::Incoming(Packet::ConnAck(connack))
-                    ) => {
-                      //  println!(      "MQTT event: Incoming(ConnAck({:?}))",          connack
-                        //);
-                        //println!(
-                        //    "Re-subscribing to command topic after (re)connect..."
-                        //);
-                        if let Err(error) =
-                            mqtt_client
-                                .subscribe(
-                                    command_topic.clone(),
-                                    QoS::AtLeastOnce,
-                                )
-                                .await
+                    Ok(Event::Incoming(Packet::ConnAck(connack))) => {
+                        println!("MQTT event: Incoming(ConnAck({:?}))", connack);
+                        println!("Re-subscribing to command topic after (re)connect...");
+                        if let Err(error) = mqtt_client
+                            .subscribe(command_topic.clone(), QoS::AtLeastOnce)
+                            .await
                         {
-                            eprintln!(
-                                "Failed to re-subscribe after reconnect: {}",
-                                error
-                            );
+                            eprintln!("Failed to re-subscribe after reconnect: {}", error);
                         } else {
                             publish_log(
                                 &mqtt_client,
@@ -906,57 +1259,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .await;
                         }
                     }
-                    Ok(
-                        Event::Incoming(packet)
-                    ) => {
-                        // println!(
-                        //     "MQTT event: Incoming({:?})",
-                        //     packet
-                        // );
+                    Ok(Event::Incoming(packet)) => {
+                        println!("MQTT event: Incoming({:?})", packet);
                     }
-                    Ok(
-                        Event::Outgoing(packet)
-                    ) => {
-                        // println!(
-                        //     "MQTT event: Outgoing({:?})",
-                        //     packet
-                        // );
+                    Ok(Event::Outgoing(packet)) => {
+                        println!("MQTT event: Outgoing({:?})", packet);
                     }
                     Err(error) => {
-                        eprintln!(
-                            "MQTT event loop error: {}",
-                            error
-                        );
-                        tokio::time::sleep(
-                            Duration::from_secs(5)
-                        )
-                        .await;
+                        eprintln!("MQTT event loop error: {}", error);
+                        tokio::time::sleep(Duration::from_secs(5)).await;
                     }
                 }
             }
-//metrics
-            _ =
-                metrics_interval.tick() => {
-                if let Err(error) =
-                    publish_metrics(
-                        &mqtt_client,
-                        &identity,
-                        &mut system,
-                    )
-                    .await
+
+            // =================================================
+            // METRICS
+            // =================================================
+            _ = metrics_interval.tick() => {
+                if let Err(error) = publish_metrics(
+                    &mqtt_client,
+                    &identity,
+                    &mut system,
+                    &mut disks,
+                    &mut networks,
+                    &mut components,
+                )
+                .await
                 {
-                    eprintln!(
-                        "Failed to publish metrics: {}",
-                        error
-                    );
+                    eprintln!("Failed to publish metrics: {}", error);
                     publish_log(
                         &mqtt_client,
                         &identity,
                         "ERROR",
-                        format!(
-                            "Failed to publish metrics: {}",
-                            error
-                        ),
+                        format!("Failed to publish metrics: {}", error),
                     )
                     .await;
                 }
